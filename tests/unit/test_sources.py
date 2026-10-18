@@ -5,16 +5,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from ebay_bot import files
 from ebay_bot.ad_loading import abspath, discover_ad_files, load_ad, load_ad_configs, resolve_ad_images
 from ebay_bot.models import Config, SourceDefaults
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _write(path: Path, content: dict[str, Any]) -> None:
@@ -35,7 +33,7 @@ def test_discover_expands_braces_relative_to_config(tmp_path: Path) -> None:
     (tmp_path / "ads" / "ad_two.json").write_text("{}", encoding="utf-8")
     (tmp_path / "ads" / "notes.txt").write_text("x", encoding="utf-8")
     found = discover_ad_files(str(tmp_path / "config.yaml"), ["ads/ad_*.{json,yml,yaml}"])
-    assert sorted(found.values()) == ["ads/ad_one.yaml", "ads/ad_two.json"]
+    assert {Path(value) for value in found.values()} == {Path("ads") / "ad_one.yaml", Path("ads") / "ad_two.json"}
     assert all(path.startswith(str(tmp_path)) for path in found)
 
 
