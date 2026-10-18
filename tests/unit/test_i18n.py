@@ -1,78 +1,56 @@
-# SPDX-FileCopyrightText: © Sebastian Thomschke and contributors
+# SPDX-FileCopyrightText: © Tomblarom and contributors
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# SPDX-ArtifactOfProjectHomePage: https://github.com/Second-Hand-Friends/kleinanzeigen-bot/
-import os
-from types import SimpleNamespace
+# SPDX-ArtifactOfProjectHomePage: https://github.com/Tomblarom/ebay-bot/
+"""Translation coverage and the independent package boundary."""
+
+import ast
+import json
+from importlib.resources import files
+from pathlib import Path
 
 import pytest
-from _pytest.monkeypatch import MonkeyPatch  # pylint: disable=import-private-name
 
-from kleinanzeigen_bot.utils import i18n
-
-
-@pytest.mark.parametrize(("lang", "expected"), [
-    (None, ("en", "US", "UTF-8")),  # No LANG: use the mocked English Windows UI language or the POSIX default.
-    ("fr", ("fr", None, "UTF-8")),  # Test with just a language code
-    ("fr_CA", ("fr", "CA", "UTF-8")),  # Test with language + region, no encoding
-    ("pt_BR.iso8859-1", ("pt", "BR", "ISO8859-1")),  # Test with language + region + encoding
-])
-def test_detect_locale(monkeypatch:MonkeyPatch, lang:str | None, expected:i18n.Locale) -> None:
-    """
-    Pytest test case to verify detect_system_language() behavior under various LANG values.
-    """
-    # Clear or set the LANG environment variable as needed.
-    if lang is None:
-        monkeypatch.delenv("LANG", raising = False)
-    else:
-        monkeypatch.setenv("LANG", lang)
-
-    # Keep the no-LANG case independent of the host's Windows UI language.
-    kernel32 = SimpleNamespace(GetUserDefaultUILanguage = lambda: 0x0409)
-    monkeypatch.setattr(i18n, "ctypes", SimpleNamespace(windll = SimpleNamespace(kernel32 = kernel32)))
-
-    # Call the function and compare the result to the expected output.
-    result = i18n._detect_locale()  # pylint: disable=protected-access
-    assert result == expected, f"For LANG={lang}, expected {expected} but got {result}"
+from ebay_bot import cli, i18n
 
 
-def test_detect_locale_uses_windows_ui_language_without_lang(monkeypatch:MonkeyPatch) -> None:
-    """Detect German Windows UI language without depending on the test host."""
-    # Replace module bindings without changing os.name for pytest or pathlib.
-    monkeypatch.setattr(i18n, "os", SimpleNamespace(name = "nt", environ = {}, path = os.path))
-    kernel32 = SimpleNamespace(GetUserDefaultUILanguage = lambda: 0x0407)
-    monkeypatch.setattr(i18n, "ctypes", SimpleNamespace(windll = SimpleNamespace(kernel32 = kernel32)))
+def test_runtime_templates_have_german_translations() -> None:
+    root = Path(str(files("ebay_bot")))
+    catalog = json.loads((root / "resources/translations.de.json").read_text(encoding="utf-8"))
+    missing: set[str] = set()
+    for source in root.rglob("*.py"):
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            target = node.func
+            explicit = isinstance(target, ast.Name) and target.id == "_"
+            logging = (
+                isinstance(target, ast.Attribute)
+                and target.attr in {"info", "warning", "error", "debug", "exception"}
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "LOG"
+            )
+            if (explicit or logging) and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                message = node.args[0].value
+                if message not in catalog:
+                    missing.add(message)
+    assert not missing
 
-    assert i18n._detect_locale() == i18n.Locale("de", "DE", "UTF-8")  # pylint: disable=protected-access
+
+def test_german_help(capsys: pytest.CaptureFixture[str]) -> None:
+    try:
+        with pytest.raises(SystemExit) as error:
+            cli.parse_args(["--lang=de", "--help"])
+        assert error.value.code == 0
+        assert "Nur lokale Vorbereitung" in capsys.readouterr().out
+    finally:
+        i18n.configure("en")
 
 
-@pytest.mark.parametrize(("lang", "noun", "count", "prefix_with_count", "expected"), [
-    ("en", "field", 1, True, "1 field"),
-    ("en", "field", 2, True, "2 fields"),
-    ("en", "field", 2, False, "fields"),
-    ("en", "attribute", 2, False, "attributes"),
-    ("en", "bus", 2, False, "buses"),
-    ("en", "city", 2, False, "cities"),
-    ("de", "Feld", 1, True, "1 Feld"),
-    ("de", "Feld", 2, True, "2 Felder"),
-    ("de", "Feld", 2, False, "Felder"),
-    ("de", "Anzeige", 2, False, "Anzeigen"),
-    ("de", "Attribute", 2, False, "Attribute"),
-    ("de", "Bild", 2, False, "Bilder"),
-    ("de", "Datei", 2, False, "Dateien"),
-    ("de", "Kategorie", 2, False, "Kategorien"),
-    ("de", "Keller", 2, True, "2 Keller"),     # el/er/en -> no suffix
-    ("de", "Auto", 2, True, "2 Autos"),         # vowel ending -> add s
-    ("de", "Hund", 2, True, "2 Hunde"),         # default -> add e
-    ("en", "x", 2, True, "2 xs"),               # len < 2 -> add s
-])
-def test_pluralize(
-    lang:str,
-    noun:str,
-    count:int,
-    prefix_with_count:bool,
-    expected:str
-) -> None:
-    i18n.set_current_locale(i18n.Locale(lang, "US", "UTF_8"))
-
-    result = i18n.pluralize(noun, count, prefix_with_count = prefix_with_count)
-    assert result == expected, f"For LANG={lang}, expected {expected} but got {result}"
+def test_no_kleinanzeigen_python_imports() -> None:
+    root = Path(str(files("ebay_bot")))
+    for source in root.rglob("*.py"):
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                assert all(not alias.name.startswith("kleinanzeigen_bot") for alias in node.names)
+            if isinstance(node, ast.ImportFrom):
+                assert not (node.module or "").startswith("kleinanzeigen_bot")

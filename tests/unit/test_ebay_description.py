@@ -4,7 +4,7 @@
 
 """Tests for mandatory eBay description link sanitation (fully offline)."""
 
-from kleinanzeigen_bot.ebay_description import sanitize_description
+from ebay_bot.ebay_description import sanitize_description
 
 
 def test_plain_text_without_links_is_unchanged() -> None:
@@ -267,9 +267,7 @@ def test_html_anchor_with_bare_domain_label_is_dropped() -> None:
 
 def test_html_anchor_variants_keep_label() -> None:
     text, removed = sanitize_description(
-        "<A CLASS=\"x\" HREF='https://a.example'>one</A> "
-        "<a href=https://b.example>two</a> "
-        '<a\nhref="https://c.example"\n>three</a>'
+        '<A CLASS="x" HREF=\'https://a.example\'>one</A> <a href=https://b.example>two</a> <a\nhref="https://c.example"\n>three</a>'
     )
     assert text == "one two three"
     assert removed == 3
@@ -470,10 +468,7 @@ def test_markdown_link_with_mailto_label_is_dropped() -> None:
 
 def test_mixed_content_counts_all_removals() -> None:
     text, removed = sanitize_description(
-        "Prefix https://p.example\n\n"
-        "Body with www.body.example, [link](https://l.example), "
-        '<a href="https://a.example">A</a> and bare.example.\n\n'
-        "Suffix."
+        'Prefix https://p.example\n\nBody with www.body.example, [link](https://l.example), <a href="https://a.example">A</a> and bare.example.\n\nSuffix.'
     )
     assert text == "Prefix\n\nBody with , link, A and .\n\nSuffix."
     assert removed == 5

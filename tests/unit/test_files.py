@@ -1,108 +1,93 @@
-# SPDX-FileCopyrightText: © Sebastian Thomschke and contributors
+# SPDX-FileCopyrightText: © Tomblarom and contributors
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# SPDX-ArtifactOfProjectHomePage: https://github.com/Second-Hand-Friends/kleinanzeigen-bot/
-"""Tests for the files utility module."""
-import os
-import tempfile
-from contextvars import ContextVar
-from pathlib import Path
+# SPDX-ArtifactOfProjectHomePage: https://github.com/Tomblarom/ebay-bot/
+"""Tests for roundtrip YAML/JSON file IO (fully offline)."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from kleinanzeigen_bot.utils.files import abspath, exists
+from ebay_bot import files
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
-class TestFiles:
-    """Test suite for files utility functions."""
+def test_save_and_load_yaml_roundtrip(tmp_path: Path) -> None:
+    path = tmp_path / "ad.yaml"
+    files.save_dict(path, {"title": "Camera", "price": 80})
+    assert files.load_dict(str(path)) == {"title": "Camera", "price": 80}
 
-    @pytest.mark.asyncio
-    async def test_exists_preserves_task_context(self, monkeypatch:pytest.MonkeyPatch) -> None:
-        context:ContextVar[str] = ContextVar("file_operation_context", default = "unset")
-        token = context.set("download")
 
-        def exists_with_context(_path:Path) -> bool:
-            assert context.get() == "download"
-            context.set("worker")
-            return True
+def test_yaml_comments_survive_roundtrip(tmp_path: Path) -> None:
+    path = tmp_path / "ad.yaml"
+    path.write_text("# top comment\ntitle: Camera  # side comment\n", encoding="utf-8")
+    data = files.load_dict(str(path))
+    data["price"] = 80
+    files.save_dict(path, data)
+    text = path.read_text(encoding="utf-8")
+    assert "# top comment" in text
+    assert "# side comment" in text
+    assert files.load_dict(str(path))["price"] == 80
 
-        monkeypatch.setattr(Path, "exists", exists_with_context)
-        try:
-            assert await exists("ad.yaml")
-            assert context.get() == "download"
-        finally:
-            context.reset(token)
 
-    def test_abspath_without_relative_to(self) -> None:
-        """Test abspath function without relative_to parameter."""
-        # Test with a simple path
-        result = abspath("test/path")
-        assert os.path.isabs(result)
-        # Use os.path.normpath to handle path separators correctly on all platforms
-        assert os.path.normpath(result).endswith(os.path.normpath("test/path"))
+def test_multiline_strings_use_block_style(tmp_path: Path) -> None:
+    path = tmp_path / "ad.yaml"
+    files.save_dict(path, {"description": "first\nsecond"})
+    assert "|" in path.read_text(encoding="utf-8")
 
-        # Test with an absolute path
-        abs_path = os.path.abspath("test/path")
-        result = abspath(abs_path)
-        assert result == abs_path
 
-    def test_abspath_with_file_reference(self) -> None:
-        """Test abspath function with a file as relative_to."""
-        with tempfile.NamedTemporaryFile() as temp_file:
-            # Test with a relative path
-            result = abspath("test/path", temp_file.name)
-            expected = os.path.normpath(os.path.join(os.path.dirname(temp_file.name), "test/path"))
-            assert result == expected
+def test_json_roundtrip(tmp_path: Path) -> None:
+    path = tmp_path / "ad.json"
+    files.save_dict(path, {"title": "Grüße", "price": 80})
+    assert files.load_dict(str(path)) == {"title": "Grüße", "price": 80}
 
-            # Test with an absolute path
-            abs_path = os.path.abspath("test/path")
-            result = abspath(abs_path, temp_file.name)
-            assert result == abs_path
 
-    def test_abspath_with_directory_reference(self) -> None:
-        """Test abspath function with a directory as relative_to."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Test with a relative path
-            result = abspath("test/path", temp_dir)
-            expected = os.path.normpath(os.path.join(temp_dir, "test/path"))
-            assert result == expected
+def test_header_is_written_first(tmp_path: Path) -> None:
+    path = tmp_path / "ad.yaml"
+    files.save_dict(path, {"title": "Camera"}, header="# generated")
+    assert path.read_text(encoding="utf-8").startswith("# generated\n")
 
-            # Test with an absolute path
-            abs_path = os.path.abspath("test/path")
-            result = abspath(abs_path, temp_dir)
-            assert result == abs_path
 
-    def test_abspath_with_nonexistent_reference(self) -> None:
-        """Test abspath function with a nonexistent file/directory as relative_to."""
-        nonexistent_path = "nonexistent/path"
+def test_save_creates_parent_directories(tmp_path: Path) -> None:
+    path = tmp_path / "nested" / "deep" / "ad.yaml"
+    files.save_dict(path, {"title": "Camera"})
+    assert files.load_dict(str(path)) == {"title": "Camera"}
 
-        # Test with a relative path; should still yield an absolute path
-        result = abspath("test/path", nonexistent_path)
-        expected = os.path.normpath(os.path.join(os.path.abspath(nonexistent_path), "test/path"))
-        assert result == expected
 
-        # Test with an absolute path
-        abs_path = os.path.abspath("test/path")
-        result = abspath(abs_path, nonexistent_path)
-        assert result == abs_path
+def test_unsupported_suffix_raises() -> None:
+    with pytest.raises(ValueError, match="Unsupported file type"):
+        files.load_dict("ad.txt")
 
-    def test_abspath_with_special_paths(self) -> None:
-        """Test abspath function with special path cases."""
-        # Test with empty path
-        result = abspath("")
-        assert os.path.isabs(result)
-        assert result == os.path.abspath("")
 
-        # Test with current directory
-        result = abspath(".")
-        assert os.path.isabs(result)
-        assert result == os.path.abspath(".")
+def test_missing_file_returns_none_for_if_exists(tmp_path: Path) -> None:
+    assert files.load_dict_if_exists(str(tmp_path / "absent.yaml")) is None
 
-        # Test with parent directory
-        result = abspath("..")
-        assert os.path.isabs(result)
-        assert result == os.path.abspath("..")
 
-        # Test with path containing ../
-        result = abspath("../test/path")
-        assert os.path.isabs(result)
-        assert result == os.path.abspath("../test/path")
+def test_missing_file_raises_for_load(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        files.load_dict(str(tmp_path / "absent.yaml"))
+
+
+def test_empty_file_loads_as_empty_dict(tmp_path: Path) -> None:
+    path = tmp_path / "empty.yaml"
+    path.write_text("", encoding="utf-8")
+    assert files.load_dict(str(path)) == {}
+
+
+def test_non_mapping_content_raises(tmp_path: Path) -> None:
+    path = tmp_path / "list.json"
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+    with pytest.raises(ValueError, match="mapping"):
+        files.load_dict(str(path))
+
+
+def test_loaded_data_supports_mutation(tmp_path: Path) -> None:
+    path = tmp_path / "ad.yaml"
+    files.save_dict(path, {"a": {"b": 1}})
+    data: dict[str, Any] = files.load_dict(str(path))
+    data["a"]["b"] = 2
+    files.save_dict(path, data)
+    assert files.load_dict(str(path)) == {"a": {"b": 2}}

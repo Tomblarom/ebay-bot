@@ -1,376 +1,54 @@
-# SPDX-FileCopyrightText: © Jens Bergmann and contributors
+# SPDX-FileCopyrightText: © Tomblarom and contributors
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# SPDX-ArtifactOfProjectHomePage: https://github.com/Second-Hand-Friends/kleinanzeigen-bot/
-"""Unit tests for CLI parsing, help text rendering, and main runtime flow."""
+# SPDX-ArtifactOfProjectHomePage: https://github.com/Tomblarom/ebay-bot/
+"""CLI boundaries and the external executable contract, entirely offline."""
 
-from __future__ import annotations
-
-import importlib.metadata
-import logging
-import os
-import runpy
-import sys
-from datetime import timedelta
+import subprocess
+from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from typing import Any
 
 import pytest
 
-from kleinanzeigen_bot import cli, runtime_config
-from kleinanzeigen_bot.utils import i18n, loggers
-from kleinanzeigen_bot.utils.exceptions import AdBatchError, CaptchaEncountered
-
-pytestmark = pytest.mark.unit
-
-
-class TestCliParseArgs:
-    @pytest.mark.parametrize(
-        ("args", "expected_command", "expected_selector", "expected_keep_old"),
-        [
-            (["script.py", "publish", "--ads=all"], "publish", "all", False),
-            (["script.py", "--force", "publish"], "publish", "all", False),
-            (["script.py", "--keep-old", "publish"], "publish", "due", True),
-            (["script.py", "download", "--ads=123,456"], "download", "123,456", False),
-        ],
-    )
-    def test_parses_command_and_selector(self, args:list[str], expected_command:str, expected_selector:str, expected_keep_old:bool) -> None:
-        parsed = cli.parse_args(args)
-
-        assert parsed.command == expected_command
-        assert parsed.ads_selector == expected_selector
-        assert parsed.keep_old_ads is expected_keep_old
-
-    def test_parses_config_and_logfile_paths(self, tmp_path:Path) -> None:
-        config_path = tmp_path / "config.yaml"
-        log_path = tmp_path / "bot.log"
-
-        parsed = cli.parse_args(["script.py", "--config", str(config_path), "--logfile", str(log_path), "help"])
-
-        assert parsed.config_arg == str(config_path)
-        assert parsed.config_file_path == str(config_path.resolve())
-        assert parsed.logfile_explicitly_provided is True
-        assert parsed.logfile_arg == str(log_path)
-        assert parsed.log_file_path == str(log_path.resolve())
-        assert parsed.command == "help"
-
-    def test_verbose_flag_enables_debug_logging(self, monkeypatch:pytest.MonkeyPatch) -> None:
-        package_logger = loggers.get_logger("kleinanzeigen_bot")
-        runtime_logger = loggers.get_logger(runtime_config.__name__)
-        monkeypatch.setattr(package_logger, "level", loggers.INFO)
-        monkeypatch.setattr(runtime_logger, "level", loggers.INFO)
-
-        cli.parse_args(["script.py", "-v", "help"])
-
-        assert loggers.is_debug(package_logger)
-        assert loggers.is_debug(runtime_logger)
-
-    def test_help_prints_and_exits(self, capsys:pytest.CaptureFixture[str]) -> None:
-        with pytest.raises(SystemExit) as exc_info:
-            cli.parse_args(["script.py", "--help"])
-
-        assert exc_info.value.code == 0
-        stdout = capsys.readouterr().out
-        assert "Usage:" in stdout
-        assert "Commands:" in stdout
-
-    def test_help_respects_language_flag_after_help(self, capsys:pytest.CaptureFixture[str]) -> None:
-        with pytest.raises(SystemExit) as exc_info:
-            cli.parse_args(["script.py", "--help", "--lang=de"])
-
-        assert exc_info.value.code == 0
-        stdout = capsys.readouterr().out
-        assert "Verwendung:" in stdout
-
-    def test_invalid_workspace_mode_exits(self) -> None:
-        with pytest.raises(SystemExit) as exc_info:
-            cli.parse_args(["script.py", "--workspace-mode=invalid", "help"])
-
-        assert exc_info.value.code == 2
-
-    def test_lang_option_updates_locale(self) -> None:
-        cli.parse_args(["script.py", "--lang=en", "help"])
-
-        assert i18n.get_current_locale().language == "en"
-
-    def test_defaults_to_help_without_command(self) -> None:
-        parsed = cli.parse_args(["script.py"])
-
-        assert parsed.command == "help"
-
-    def test_invalid_option_exits(self) -> None:
-        with pytest.raises(SystemExit) as exc_info:
-            cli.parse_args(["script.py", "--bogus"])
-
-        assert exc_info.value.code == 2
-
-    def test_more_than_one_command_exits(self) -> None:
-        with pytest.raises(SystemExit) as exc_info:
-            cli.parse_args(["script.py", "verify", "publish"])
-
-        assert exc_info.value.code == 2
-
-    def test_parses_preserve_local_settings_flag(self) -> None:
-        parsed = cli.parse_args(["script.py", "--preserve-local-settings", "download"])
-
-        assert parsed.preserve_local_settings is True
-        assert parsed.command == "download"
-
-
-class TestCliHelpText:
-    def test_show_help_uses_german_text(self, capsys:pytest.CaptureFixture[str], monkeypatch:pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(cli, "get_current_locale", lambda: SimpleNamespace(language = "de"))
-
-        cli.show_help()
-
-        stdout = capsys.readouterr().out
-        assert "Verwendung:" in stdout
-        assert "Befehle:" in stdout
-
-    def test_help_executable_uses_frozen_executable(self, monkeypatch:pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(cli, "is_frozen", lambda: True)
-        monkeypatch.setattr(sys, "argv", ["/usr/local/bin/kleinanzeigen-bot"])
-
-        assert cli._help_executable() == "/usr/local/bin/kleinanzeigen-bot"  # noqa: SLF001
-
-    def test_help_executable_uses_pdm_when_project_root_is_set(self, monkeypatch:pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(cli, "is_frozen", lambda: False)
-        monkeypatch.setenv("PDM_PROJECT_ROOT", "/project")
-
-        assert cli._help_executable() == "pdm run app"  # noqa: SLF001
-
-    def test_help_executable_uses_module_invocation_by_default(self, monkeypatch:pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(cli, "is_frozen", lambda: False)
-        monkeypatch.delenv("PDM_PROJECT_ROOT", raising = False)
-
-        assert cli._help_executable() == "python -m kleinanzeigen_bot"  # noqa: SLF001
-
-
-class TestCliMain:
-    @staticmethod
-    def _fake_bot() -> SimpleNamespace:
-        return SimpleNamespace(close_browser_session = lambda: None, run = lambda args: object())
-
-    @pytest.mark.parametrize("error", [RuntimeError("boom"), AdBatchError("Failed to publish 1 ad")])
-    def test_main_forwards_unhandled_exceptions_to_error_handler(self, monkeypatch:pytest.MonkeyPatch, error:Exception) -> None:
-        handled:dict[str, object] = {}
-
-        class FailingLoop:
-            def run_until_complete(self, _coro:object) -> None:
-                raise error
-
-        def handle_exception(exc_type:object, exc:object, _traceback:object) -> None:
-            handled.update(exc_type = exc_type, exc = exc)
-
-        monkeypatch.setattr("kleinanzeigen_bot.cli.atexit.register", lambda *args, **kwargs: None)
-        monkeypatch.setattr("kleinanzeigen_bot.cli.nodriver.loop", FailingLoop)
-        monkeypatch.setattr(cli, "KleinanzeigenBot", self._fake_bot)
-        monkeypatch.setattr("kleinanzeigen_bot.cli._error_handlers.on_exception", handle_exception)
-
-        with pytest.raises(SystemExit) as exc_info:
-            cli.main(["script.py", "version"])
-
-        assert handled["exc_type"] is type(error)
-        assert handled["exc"] is error
-        assert exc_info.value.code == 1
-
-    def test_main_reraises_captcha(self, monkeypatch:pytest.MonkeyPatch) -> None:
-        captcha = CaptchaEncountered(timedelta(seconds = 1))
-
-        class CaptchaLoop:
-            def run_until_complete(self, _coro:object) -> None:
-                raise captcha
-
-        monkeypatch.setattr("kleinanzeigen_bot.cli.atexit.register", lambda *args, **kwargs: None)
-        monkeypatch.setattr("kleinanzeigen_bot.cli.nodriver.loop", CaptchaLoop)
-        monkeypatch.setattr(cli, "KleinanzeigenBot", self._fake_bot)
-
-        with pytest.raises(CaptchaEncountered) as exc_info:
-            cli.main(["script.py", "version"])
-
-        assert exc_info.value is captcha
-
-    def test_module_entrypoint_calls_cli_main_and_exits(self, monkeypatch:pytest.MonkeyPatch) -> None:
-        calls:list[list[str]] = []
-        monkeypatch.setattr(sys, "argv", ["kleinanzeigen-bot", "version"])
-        monkeypatch.setattr(cli, "main", lambda args: calls.append(list(args)))
-
-        with pytest.raises(SystemExit) as exc_info:
-            runpy.run_module("kleinanzeigen_bot.__main__", run_name = "__main__")
-
-        assert exc_info.value.code == 0
-        assert calls == [["kleinanzeigen-bot", "version"]]
-
-
-class TestFrozenLibraryPathRestore:
-    """Tests for _restore_library_path_for_subprocesses (PyInstaller LD_LIBRARY_PATH leak)."""
-
-    @pytest.fixture(autouse = True)
-    def _frozen_linux(self, monkeypatch:pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(cli, "is_frozen", lambda: True)
-        monkeypatch.setattr(sys, "platform", "linux")
-
-    def test_restores_original_value(self, monkeypatch:pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("LD_LIBRARY_PATH", "/bundle/_MEI123")
-        monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/opt/lib")
-
-        cli._restore_library_path_for_subprocesses()  # noqa: SLF001
-
-        assert os.environ["LD_LIBRARY_PATH"] == "/opt/lib"
-
-    def test_removes_bundle_path_when_no_original(self, monkeypatch:pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("LD_LIBRARY_PATH", "/bundle/_MEI123")
-        monkeypatch.delenv("LD_LIBRARY_PATH_ORIG", raising = False)
-
-        cli._restore_library_path_for_subprocesses()  # noqa: SLF001
-
-        assert "LD_LIBRARY_PATH" not in os.environ
-
-    @pytest.mark.parametrize(("frozen", "platform"), [(False, "linux"), (True, "darwin"), (True, "win32")])
-    def test_leaves_environment_untouched_elsewhere(self, monkeypatch:pytest.MonkeyPatch, frozen:bool, platform:str) -> None:
-        monkeypatch.setattr(cli, "is_frozen", lambda: frozen)
-        monkeypatch.setattr(sys, "platform", platform)
-        monkeypatch.setenv("LD_LIBRARY_PATH", "/bundle/_MEI123")
-        monkeypatch.delenv("LD_LIBRARY_PATH_ORIG", raising = False)
-
-        cli._restore_library_path_for_subprocesses()  # noqa: SLF001
-
-        assert os.environ["LD_LIBRARY_PATH"] == "/bundle/_MEI123"
-
-
-class TestNodriverPatchGuard:
-    """Tests for _warn_unpatched_nodriver runtime guard."""
-
-    @staticmethod
-    def _make_mock_dist(tmp_path:Path, connection_text:str) -> MagicMock:
-        """Build a fake distribution whose locate_file returns a file in tmp_path."""
-        fpath = tmp_path / "connection.py"
-        fpath.write_text(connection_text, encoding = "utf-8")
-        dist = MagicMock()
-        dist.locate_file.return_value = fpath
-        return dist
-
-    def _setup(self) -> None:
-        """Reset the warned flag before each guard test."""
-        cli._warned_nodriver_patch[0] = False  # noqa: SLF001
-
-    def test_no_warning_when_marker_present(self, caplog:pytest.LogCaptureFixture, tmp_path:Path) -> None:
-        """Marker present => no warning."""
-        self._setup()
-        dist = self._make_mock_dist(tmp_path, "# KLEINANZEIGEN_BOT_NODEDRIVER_CDP_REATTACH_PATCH_V1: retry loop\n...\nfor _retry in range(2):\n")
-        with patch("kleinanzeigen_bot.cli.importlib.metadata.distribution", return_value = dist):
-            cli._warn_unpatched_nodriver()  # noqa: SLF001
-        assert "nodriver CDP re-attach patch not found" not in caplog.text
-
-    def test_warning_when_marker_absent(self, caplog:pytest.LogCaptureFixture, tmp_path:Path) -> None:
-        """Marker absent => warning once."""
-        self._setup()
-        dist = self._make_mock_dist(tmp_path, "# original nodriver code\nasync def send(...):\n    pass\n")
-        with patch("kleinanzeigen_bot.cli.importlib.metadata.distribution", return_value = dist):
-            cli._warn_unpatched_nodriver()  # noqa: SLF001
-        assert "nodriver CDP re-attach patch not found" in caplog.text
-
-    def test_warning_only_once(self, caplog:pytest.LogCaptureFixture, tmp_path:Path) -> None:
-        """Repeated calls => warned only once."""
-        self._setup()
-        dist = self._make_mock_dist(tmp_path, "# unpatched\n")
-        with patch("kleinanzeigen_bot.cli.importlib.metadata.distribution", return_value = dist):
-            cli._warn_unpatched_nodriver()  # noqa: SLF001
-            cli._warn_unpatched_nodriver()  # noqa: SLF001
-            cli._warn_unpatched_nodriver()  # noqa: SLF001
-        assert caplog.text.count("nodriver CDP re-attach patch not found") == 1
-
-    def test_silent_when_package_not_found(self, caplog:pytest.LogCaptureFixture) -> None:
-        """PackageNotFoundError => silent, no warning."""
-        self._setup()
-        with patch("kleinanzeigen_bot.cli.importlib.metadata.distribution", side_effect = importlib.metadata.PackageNotFoundError):
-            cli._warn_unpatched_nodriver()  # noqa: SLF001
-        assert "nodriver CDP re-attach patch not found" not in caplog.text
-
-    def test_silent_when_frozen(self, caplog:pytest.LogCaptureFixture) -> None:
-        """Frozen build => silent, no warning, never checks."""
-        self._setup()
-        with patch("kleinanzeigen_bot.cli.is_frozen", return_value = True):
-            cli._warn_unpatched_nodriver()  # noqa: SLF001
-        assert "nodriver CDP re-attach patch not found" not in caplog.text
-
-    # ── edge-case coverage ─────────────────────────────────────────────────
-
-    def test_silent_when_metadata_generic_exception(self, caplog:pytest.LogCaptureFixture) -> None:
-        """Generic exception during metadata lookup => silent, no warning, flag unchanged."""
-        self._setup()
-        with patch("kleinanzeigen_bot.cli.importlib.metadata.distribution", side_effect = ValueError("corrupt")):
-            cli._warn_unpatched_nodriver()  # noqa: SLF001
-        assert "nodriver CDP re-attach patch not found" not in caplog.text
-        assert cli._warned_nodriver_patch[0] is False  # noqa: SLF001
-
-    def test_silent_when_metadata_generic_exception_debug_logged(
-        self,
-        caplog:pytest.LogCaptureFixture,
-    ) -> None:
-        """Generic metadata exception writes debug log when LOG is DEBUG."""
-        self._setup()
-        prev_level = cli.LOG.level
-        cli.LOG.setLevel(logging.DEBUG)
-        try:
-            with patch("kleinanzeigen_bot.cli.importlib.metadata.distribution", side_effect = ValueError("corrupt")):
-                cli._warn_unpatched_nodriver()  # noqa: SLF001
-            assert "nodriver patch check: metadata lookup failed" in caplog.text
-        finally:
-            cli.LOG.setLevel(prev_level)
-
-    def test_silent_when_locator_fallback_attribute_error(self, caplog:pytest.LogCaptureFixture, tmp_path:Path) -> None:
-        """locate_file() AttributeError => fallback to dist._path works; no warning when marker present."""
-        self._setup()
-        # Fake site-packages tree under tmp_path.
-        site_pkgs = tmp_path / "site-packages"
-        fake_dist_info = site_pkgs / "nodriver-1.0.0.dist-info"
-        fake_dist_info.mkdir(parents = True)
-        conn_py = site_pkgs / "nodriver" / "core" / "connection.py"
-        conn_py.parent.mkdir(parents = True)
-        conn_py.write_text("# KLEINANZEIGEN_BOT_NODEDRIVER_CDP_REATTACH_PATCH_V1\n", encoding = "utf-8")
-
-        dist = MagicMock()
-        dist.locate_file.side_effect = AttributeError("no locate_file")
-        dist._path = fake_dist_info  # noqa: SLF001
-
-        with patch("kleinanzeigen_bot.cli.importlib.metadata.distribution", return_value = dist):
-            cli._warn_unpatched_nodriver()  # noqa: SLF001
-        # Fallback resolved to the real file with marker => silent.
-        assert "nodriver CDP re-attach patch not found" not in caplog.text
-        assert cli._warned_nodriver_patch[0] is False  # noqa: SLF001
-
-    def test_silent_when_path_resolution_generic_exception(self, caplog:pytest.LogCaptureFixture) -> None:
-        """Generic exception during path resolution => silent, no warning, flag unchanged."""
-        self._setup()
-        dist = MagicMock()
-        dist.locate_file.side_effect = RuntimeError("unexpected")
-        with patch("kleinanzeigen_bot.cli.importlib.metadata.distribution", return_value = dist):
-            cli._warn_unpatched_nodriver()  # noqa: SLF001
-        assert "nodriver CDP re-attach patch not found" not in caplog.text
-        assert cli._warned_nodriver_patch[0] is False  # noqa: SLF001
-
-    def test_silent_when_connection_path_missing(self, caplog:pytest.LogCaptureFixture, tmp_path:Path) -> None:
-        """Non-existent connection.py => silent, no warning, flag unchanged."""
-        self._setup()
-        dist = MagicMock()
-        dist.locate_file.return_value = tmp_path / "nonexistent" / "connection.py"
-        with patch("kleinanzeigen_bot.cli.importlib.metadata.distribution", return_value = dist):
-            cli._warn_unpatched_nodriver()  # noqa: SLF001
-        assert "nodriver CDP re-attach patch not found" not in caplog.text
-        assert cli._warned_nodriver_patch[0] is False  # noqa: SLF001
-
-    def test_silent_when_read_text_oserror(self, caplog:pytest.LogCaptureFixture, tmp_path:Path) -> None:
-        """read_text OSError => silent, no warning, flag unchanged."""
-        self._setup()
-        conn_py = tmp_path / "connection.py"
-        conn_py.write_text("unpatched content", encoding = "utf-8")
-        dist = MagicMock()
-        dist.locate_file.return_value = conn_py
-        with (
-            patch("kleinanzeigen_bot.cli.importlib.metadata.distribution", return_value = dist),
-            patch.object(Path, "read_text", side_effect = OSError("permission denied")),
-        ):
-            cli._warn_unpatched_nodriver()  # noqa: SLF001
-        assert "nodriver CDP re-attach patch not found" not in caplog.text
-        assert cli._warned_nodriver_patch[0] is False  # noqa: SLF001
+from ebay_bot import cli
+
+
+@pytest.mark.parametrize("command", ["prepare", "ebay-prepare", "publish", "ebay-publish"])
+def test_command_aliases_and_defaults(command: str) -> None:
+    parsed = cli.parse_args([command, "--dry-run"])
+    assert parsed.command == command.removeprefix("ebay-")
+    assert parsed.ads == "new"
+    assert parsed.fee_limit == Decimal(0)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["prepare", "--refresh"],
+        ["verify", "--fee-limit=1"],
+        ["publish", "--fee-limit=NaN"],
+        ["publish", "--fee-limit=-1"],
+        ["download", "--dry-run", "--kleinanzeigen-config=config.yaml"],
+        ["download"],
+        ["prepare", "--ads=due"],
+    ],
+)
+def test_invalid_options_fail_before_execution(arguments: list[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.parse_args(arguments)
+    assert exc.value.code == 2
+
+
+def test_download_uses_external_cli_without_shell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = tmp_path / "config with spaces;touch.yaml"
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 7)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli.main(["download", "--kleinanzeigen-config", str(config), "--ads=42,43", "--kleinanzeigen-command=/opt/bin/kleinanzeigen-bot"]) == 7
+    assert calls == [
+        (["/opt/bin/kleinanzeigen-bot", "download", "--ads=42,43", "--workspace-mode=portable", "--config=" + str(config.resolve())], {"check": False})
+    ]

@@ -1,31 +1,24 @@
-# Local work folder that is not checked in
-_LOCAL/
-
-.*
-!.act-event.json
-!.actrc
-!.gitattribute
-!.gitignore
-!.github/
-!.markdownlint-cli2.jsonc
-
-# kleinanzeigen_bot
-/config.yaml
-/data
-/*.log
-/src/kleinanzeigen_bot/_version.py
-downloaded-ads
-
-# python
-__pycache__
-__pypackages__
-/dist
-
-# IntelliJ
-/*.iml
-/*.ipr
-/*.iws
-
-# Vim
-*.swo
-*.swp
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pdm-python
+.pdm-build/
+*.egg-info/
+build/
+dist/
+.coverage*
+htmlcov/
+.env
+.env.*
+config.yaml
+config.json
+ad_*.yaml
+ad_*.json
+downloaded-ads/
+*.sqlite3*
+*.log
+.temp/
+paseo.json
